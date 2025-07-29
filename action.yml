@@ -1,30 +1,26 @@
 name: "Tree-sitter fact dump"
-description: "Emit code_facts_full.json (all symbols) and code_facts_delta.json (changed files)"
-author: "Joseph Folkes"
-branding: { icon: archive, color: purple }
+description: "Emit code_facts_full.json and code_facts_delta.json"
 
 inputs:
-  out_full:  { description: "Path for the full JSON output",  required: true }
-  out_delta: { description: "Path for the delta JSON output", required: true }
-  base_sha:  { description: "Commit SHA to diff against",     required: true }
+  out_full:
+    required: true
+  out_delta:
+    required: true
+  base_sha:
+    required: true
 
 runs:
   using: "composite"
   steps:
-    # 1  Python runtime
     - uses: actions/setup-python@v5
-      with: { python-version: "3.12" }
+      with:
+        python-version: "3.11"
 
-    # 2  Install bindings **and** pre-built grammars (no compilation needed)
-    - name: Install Tree-sitter Python packages
+    - name: Install Tree-sitter dependencies
       shell: bash
-      run: |
-        pip install --no-cache-dir \
-          "tree_sitter>=0.25,<0.26" \
-          "tree-sitter-languages>=1.9,<2"
+      run: pip install --no-cache-dir tree-sitter-languages==1.10.2
 
-    # 3  Run the extractor
-    - name: Dump code facts (full + delta)
+    - name: Generate code facts
       shell: bash
       run: |
         python "${{ github.action_path }}/extractor.py" \
