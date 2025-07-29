@@ -1,20 +1,12 @@
 name: "Tree-sitter fact dump"
-description: "Emit deterministic code_facts_full.json (all symbols) and code_facts_delta.json (changed files only)"
-author: "Joseph Folkes"
-branding:
-  icon: archive
-  color: purple
+description: "Emit code_facts_full.json (all symbols) and code_facts_delta.json (changed files)"
+author: "Sammy MVP"
+branding: { icon: archive, color: purple }
 
 inputs:
-  out_full:
-    description: "Path for the full JSON output"
-    required: true
-  out_delta:
-    description: "Path for the delta JSON output"
-    required: true
-  base_sha:
-    description: "Commit SHA to diff against for the delta"
-    required: true
+  out_full:  { description: "Path for the full JSON output",  required: true }
+  out_delta: { description: "Path for the delta JSON output", required: true }
+  base_sha:  { description: "Commit SHA to diff against",     required: true }
 
 runs:
   using: "composite"
@@ -24,9 +16,8 @@ runs:
 
     - name: Install tree-sitter Python bindings
       shell: bash
-      run: pip install --no-cache-dir tree_sitter
+      run: pip install --no-cache-dir "tree_sitter>=0.25,<0.26"
 
-    # ---------- cache compiled grammars ----------
     - name: Restore / build Tree-sitter grammars
       id: grammars
       uses: actions/cache@v4
@@ -34,21 +25,20 @@ runs:
         path: vendor/build
         key: ${{ runner.os }}-ts-grammars-v1
 
-    - name: Compile grammars (first-run only)
+    - name: Compile grammars (first run only)
       if: steps.grammars.outputs.cache-hit != 'true'
       shell: bash
       run: |
         python - <<'PY'
-        import pathlib, subprocess, sys
-        vendor = pathlib.Path('vendor').resolve()
+        from tree_sitter import Language
+        import pathlib
+        vendor = pathlib.Path('vendor')
         build  = vendor / 'build'
         build.mkdir(parents=True, exist_ok=True)
         grammars = [str(p) for p in vendor.glob('tree-sitter-*')]
-        subprocess.check_call(['python', '-m', 'tree_sitter.build_library',
-                               str(build/'lang.so'), *grammars])
+        Language.build_library(str(build/'lang.so'), grammars)
         PY
 
-    # ---------- run extractor ----------
     - name: Dump code facts (full + delta)
       shell: bash
       run: |
