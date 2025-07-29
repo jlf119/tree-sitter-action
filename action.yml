@@ -2,12 +2,9 @@ name: "Tree-sitter fact dump"
 description: "Emit code_facts_full.json and code_facts_delta.json"
 
 inputs:
-  out_full:
-    required: true
-  out_delta:
-    required: true
-  base_sha:
-    required: true
+  out_full:  { required: true }
+  out_delta: { required: true }
+  base_sha:  { required: true }
 
 runs:
   using: "composite"
@@ -16,9 +13,12 @@ runs:
       with:
         python-version: "3.11"
 
-    - name: Install Tree-sitter dependencies
+    - name: Install compatible Tree-sitter wheels
       shell: bash
-      run: pip install --no-cache-dir tree-sitter-languages==1.10.2
+      run: |
+        pip install --no-cache-dir \
+          tree_sitter==0.20.4 \
+          tree-sitter-languages==1.10.2
 
     - name: Generate code facts
       shell: bash
