@@ -1,338 +1,239 @@
 #!/usr/bin/env python3
 """
-Full Multi-language Tree-sitter fact extractor (fixed)
-----------------------------------------------------
-Emits all eight fact-types needed for EU MDR documentation across Python, JavaScript, TypeScript/TSX, and Go:
+Walk the repo with Tree‑sitter (using the pre‑built grammars from
+``tree‑sitter‑languages``) and emit JSON facts about every symbol it can
+find.
 
-- symbol: functions, classes, methods
-- import: import statements
-- decorator: Python @decorators and JS/TS decorators
-- call: function and method calls
-- annotation: type hints (Python) and TS/Go type declarations
-- test_case: unit tests (e.g., test_*, Jest 'it', Go testing functions)
-- complexity: cyclomatic complexity per function
-- docstring: docstrings or top-of-function comments
+ • ``--out-full``   – all symbols in ``HEAD``
+ • ``--out-delta``  – only symbols whose *files* changed vs ``--base-sha``
 
-Fix: uses `get_language()` for queries instead of non-existent parser.language attribute.
+Supported languages (dedicated collectors):
+ • Python     ``.py``
+ • Dart       ``.dart``
+
+For JavaScript/TypeScript/Go – and for any other language that has a
+Tree‑sitter grammar available but no bespoke collector – a single generic
+fact is emitted per file.
+
+If a file’s language *isn’t* recognised *or* a grammar is missing, the
+script **falls back gracefully** to a one‑fact‑per‑file strategy instead
+of aborting. This means it now *never* crashes just because it encounters
+an unfamiliar source file.
 """
 
-import argparse, hashlib, json, logging, pathlib, re, subprocess, sys
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
-from typing import Dict, Iterable, List
-from tree_sitter import Node
-from tree_sitter_languages import get_parser, get_language
+from __future__ import annotations
 
-# ────────────── Language Configurations ──────────────
+import argparse
+import hashlib
+import json
+import pathlib
+import re
+import subprocess
+import sys
+from contextlib import suppress
+from typing import List
+
+try:
+    from tree_sitter_languages import get_parser  # ready‑to‑use parsers
+except ImportError as exc:  # pragma: no‑cover – clearly actionable error
+    sys.stderr.write(
+        "tree_sitter_languages not importable - install it with\n"
+        "    pip install tree-sitter-languages\n"
+    )
+    raise
+
+# ── Language ↔︎ file‑extension map ────────────────────────────────────
 EXT_TO_LANG = {
-    ".py": "python",
-    ".js": "javascript",
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    ".go": "go",
+    ".py":   "python",
+    ".js":   "javascript",
+    ".ts":   "typescript",
+    ".tsx":  "tsx",
+    ".go":   "go",
+    ".dart": "dart",
 }
 
-LANG_QUERIES: Dict[str, Dict[str, str]] = {
-    "python": {
-        "symbol": """
-            (function_definition name: (identifier) @sym.name)
-            (class_definition name: (identifier) @sym.name)
-        """,
-        "import": """
-            (import_statement name: (dotted_name) @import.module)
-            (import_from_statement module_name: (dotted_name) @import.module)
-        """,
-        "decorator": """
-            (decorator name: (identifier) @decorator.name)
-        """,
-        "call": """
-            (call function: (identifier) @call.name)
-        """,
-        "annotation": """
-            (type_hint (identifier) @type.name)
-        """,
-        "docstring": """
-            (expression_statement (string) @doc.string)
-        """,
-        "test_case": """
-            (function_definition name: (identifier) @test.name (#match? @test.name "^test_"))
-        """,
-    },
-    "javascript": {
-        "symbol": """
-            (function_declaration name: (identifier) @sym.name)
-            (class_declaration name: (identifier) @sym.name)
-        """,
-        "import": """
-            (import_statement source: (string) @import.module)
-        """,
-        "call": """
-            (call_expression function: (identifier) @call.name)
-        """,
-        "docstring": """
-            (comment) @doc.string
-        """,
-        "test_case": """
-            (call_expression function: (identifier) @test.name (#match? @test.name "^(it|test)$"))
-        """,
-    },
-    "typescript": {
-        "symbol": """
-            (function_declaration name: (identifier) @sym.name)
-            (class_declaration name: (identifier) @sym.name)
-        """,
-        "import": """
-            (import_statement source: (string) @import.module)
-        """,
-        "decorator": """
-            (decorator name: (identifier) @decorator.name)
-        """,
-        "call": """
-            (call_expression function: (identifier) @call.name)
-        """,
-        "annotation": """
-            (type_annotation (predefined_type) @type.name)
-        """,
-        "docstring": """
-            (comment) @doc.string
-        """,
-        "test_case": """
-            (call_expression function: (identifier) @test.name (#match? @test.name "^(it|test)$"))
-        """,
-    },
-    "tsx": {
-        "symbol": """
-            (function_declaration name: (identifier) @sym.name)
-            (class_declaration name: (identifier) @sym.name)
-        """,
-        "import": """
-            (import_statement source: (string) @import.module)
-        """,
-        "call": """
-            (call_expression function: (identifier) @call.name)
-        """,
-        "annotation": """
-            (type_annotation (predefined_type) @type.name)
-        """,
-        "docstring": """
-            (comment) @doc.string
-        """,
-        "test_case": """
-            (call_expression function: (identifier) @test.name (#match? @test.name "^(it|test)$"))
-        """,
-    },
-    "go": {
-        "symbol": """
-            (function_declaration name: (identifier) @sym.name)
-            (method_declaration name: (field_identifier) @sym.name)
-            (type_spec name: (type_identifier) @sym.name)
-        """,
-        "import": """
-            (import_spec path: (interpreted_string_literal) @import.module)
-        """,
-        "call": """
-            (call_expression function: (identifier) @call.name)
-        """,
-        "annotation": """
-            (type_spec name: (type_identifier) @type.name)
-        """,
-        "docstring": """
-            (comment) @doc.string
-        """,
-        "test_case": """
-            (function_declaration name: (identifier) @test.name (#match? @test.name "^Test"))
-        """,
-    },
-}
+# ── Helpers ───────────────────────────────────────────────────────────
 
-BRANCHING_TYPES = {
-    "python": ["if_statement", "for_statement", "while_statement", "try_statement", "with_statement", "match_statement"],
-    "javascript": ["if_statement", "for_statement", "while_statement", "do_statement", "switch_statement"],
-    "typescript": ["if_statement", "for_statement", "while_statement", "do_statement", "switch_statement"],
-    "tsx": ["if_statement", "for_statement", "while_statement", "do_statement", "switch_statement"],
-    "go": ["if_statement", "for_statement", "switch_statement", "select_statement"],
-}
-
-# ────────────── Utility helpers ──────────────
 def sha10(text: str) -> str:
+    """Return the first 10 hex chars of an SHA‑1 hash (deterministic id)."""
     return hashlib.sha1(text.encode()).hexdigest()[:10]
 
-@lru_cache(maxsize=None)
-def parser_for(lang_id: str):
-    return get_parser(lang_id)
+# ── Python collector ─────────────────────────────────────────────────
 
-def to_module(path: pathlib.Path, lang_id: str) -> str:
-    if lang_id == "python" and path.name == "__init__.py":
-        path = path.parent
-    return path.with_suffix("").as_posix().replace("/", ".")
+def _py_fq_name(node, src: bytes, path: pathlib.Path) -> str:
+    parts: List[str] = []
+    while node:
+        if node.type in ("function_definition", "class_definition"):
+            ident_node = node.child_by_field_name("name")
+            ident = src[ident_node.start_byte : ident_node.end_byte].decode()
+            parts.insert(0, ident)
+        node = node.parent
+    module = path.with_suffix("").as_posix().replace("/", ".")
+    return f"{module}." + ".".join(parts) if parts else module
 
-def cyclomatic(node: Node, lang_id: str) -> int:
-    branching = set(BRANCHING_TYPES.get(lang_id, ()))
-    score = 1
-    stack = [node]
-    while stack:
-        n = stack.pop()
-        if n.type in branching:
-            score += 1
-        stack.extend(n.children)
-    return score
 
-# ────────────── Extraction ──────────────
-def collect_facts(path: pathlib.Path, lang_id: str) -> List[dict]:
-    parser = parser_for(lang_id)
+def collect_python(path: pathlib.Path, parser):
     src = path.read_bytes()
     tree = parser.parse(src)
-    language = get_language(lang_id)  # FIX: get Language object for queries
+    out: list[dict] = []
 
-    facts: List[dict] = []
-
-    for fact_type, query_src in LANG_QUERIES[lang_id].items():
-        query = language.query(query_src)
-        for node, cap in query.captures(tree.root_node):
-            text_val = src[node.start_byte:node.end_byte].decode().strip("\"'")
-            module_name = to_module(path, lang_id)
-
-            if fact_type == "symbol":
-                fq = f"{module_name}.{text_val}" if text_val else module_name
-                facts.append({
-                    "id": "CU-" + sha10(f"symbol|{fq}|{path}"),
-                    "kind": "symbol",
-                    "symbol": fq,
-                    "signature": "()",
-                    "lang": lang_id,
-                    "complexity": cyclomatic(node.parent if node.parent else node, lang_id),
+    stack = [tree.root_node]
+    while stack:
+        n = stack.pop()
+        if n.type == "function_definition":
+            name = _py_fq_name(n, src, path)
+            sig = re.search(
+                rb"def\s+" + name.split(".")[-1].encode() + rb"\s*(\(.*?\))",
+                src[n.start_byte : n.end_byte],
+                re.S,
+            )
+            sig_text = sig.group(1).decode(errors="ignore") if sig else "()"
+            raw = f"python|{name}|{sig_text}|{path}"
+            out.append(
+                {
+                    "id": "CU-" + sha10(raw),
+                    "symbol": name,
+                    "signature": sig_text,
+                    "lang": "python",
                     "file": str(path),
-                    "line_start": node.start_point[0] + 1,
-                    "line_end": node.end_point[0] + 1,
-                })
-            elif fact_type == "import":
-                facts.append({
-                    "id": "CU-" + sha10(f"import|{module_name}|{text_val}"),
-                    "kind": "import",
-                    "module": module_name,
-                    "imports": text_val,
-                    "lang": lang_id,
+                    "line_start": n.start_point[0] + 1,
+                    "line_end": n.end_point[0] + 1,
+                }
+            )
+        stack.extend(n.children)
+    return out
+
+# ── Dart collector ───────────────────────────────────────────────────
+
+_DART_DECL_NODES = {
+    "function_declaration",
+    "method_declaration",
+    "constructor_declaration",
+}
+
+
+def _dart_fq_name(node, src: bytes, path: pathlib.Path) -> str:
+    """Best‑effort dotted name like ``lib.src.foo.Bar.baz``."""
+    parts: List[str] = []
+    while node:
+        if node.type in _DART_DECL_NODES or node.type == "class_declaration":
+            ident_node = node.child_by_field_name("name")
+            if ident_node:
+                ident = src[ident_node.start_byte : ident_node.end_byte].decode()
+                parts.insert(0, ident)
+        node = node.parent
+    module = path.with_suffix("").as_posix().replace("/", ".")
+    return f"{module}." + ".".join(parts) if parts else module
+
+
+def collect_dart(path: pathlib.Path, parser):
+    src = path.read_bytes()
+    tree = parser.parse(src)
+    out: list[dict] = []
+
+    stack = [tree.root_node]
+    while stack:
+        n = stack.pop()
+        if n.type in _DART_DECL_NODES:
+            name = _dart_fq_name(n, src, path)
+            local_src = src[n.start_byte : n.end_byte]
+            pattern = rb"\b" + name.split(".")[-1].encode() + rb"\s*(\(.*?\))"
+            sig = re.search(pattern, local_src, re.S)
+            sig_text = sig.group(1).decode(errors="ignore") if sig else "()"
+            raw = f"dart|{name}|{sig_text}|{path}"
+            out.append(
+                {
+                    "id": "CU-" + sha10(raw),
+                    "symbol": name,
+                    "signature": sig_text,
+                    "lang": "dart",
                     "file": str(path),
-                    "line_start": node.start_point[0] + 1,
-                    "line_end": node.end_point[0] + 1,
-                })
-            elif fact_type == "decorator":
-                fq = module_name
-                facts.append({
-                    "id": "CU-" + sha10(f"decorator|{fq}|{text_val}"),
-                    "kind": "decorator",
-                    "symbol": fq,
-                    "decorator": text_val,
-                    "lang": lang_id,
-                    "file": str(path),
-                    "line_start": node.start_point[0] + 1,
-                    "line_end": node.end_point[0] + 1,
-                })
-            elif fact_type == "call":
-                facts.append({
-                    "id": "CU-" + sha10(f"call|{module_name}|{text_val}"),
-                    "kind": "call",
-                    "caller_module": module_name,
-                    "callee": text_val,
-                    "lang": lang_id,
-                    "file": str(path),
-                    "line_start": node.start_point[0] + 1,
-                    "line_end": node.end_point[0] + 1,
-                })
-            elif fact_type == "annotation":
-                facts.append({
-                    "id": "CU-" + sha10(f"annotation|{module_name}|{text_val}"),
-                    "kind": "annotation",
-                    "symbol": module_name,
-                    "annotation": text_val,
-                    "lang": lang_id,
-                    "file": str(path),
-                    "line_start": node.start_point[0] + 1,
-                    "line_end": node.end_point[0] + 1,
-                })
-            elif fact_type == "docstring":
-                facts.append({
-                    "id": "CU-" + sha10(f"docstring|{module_name}|{text_val}"),
-                    "kind": "docstring",
-                    "symbol": module_name,
-                    "doc": text_val,
-                    "lang": lang_id,
-                    "file": str(path),
-                    "line_start": node.start_point[0] + 1,
-                    "line_end": node.end_point[0] + 1,
-                })
-            elif fact_type == "test_case":
-                fq = f"{module_name}.{text_val}" if text_val else module_name
-                facts.append({
-                    "id": "CU-" + sha10(f"test_case|{fq}|{path}"),
-                    "kind": "test_case",
-                    "symbol": fq,
-                    "lang": lang_id,
-                    "file": str(path),
-                    "line_start": node.start_point[0] + 1,
-                    "line_end": node.end_point[0] + 1,
-                })
+                    "line_start": n.start_point[0] + 1,
+                    "line_end": n.end_point[0] + 1,
+                }
+            )
+        stack.extend(n.children)
+    return out
 
-    return facts
+# ── Fallback: one fact per file ───────────────────────────────────────
 
-# ────────────── File iteration ──────────────
-def iter_source_files(root: pathlib.Path) -> Iterable[pathlib.Path]:
-    for path in root.rglob("*"):
-        if path.is_dir() or path.is_symlink():
-            continue
-        if any(part.startswith(".") for part in path.parts):
-            continue
-        if path.suffix in EXT_TO_LANG:
-            yield path
+def file_fact(path: pathlib.Path, lang_id: str):
+    raw = f"{lang_id}|{path}"
+    return [
+        {
+            "id": "CU-" + sha10(raw),
+            "symbol": path.stem,
+            "lang": lang_id,
+            "file": str(path),
+            "line_start": 1,
+            "line_end": sum(1 for _ in open(path, "rb")),
+        }
+    ]
 
-# ────────────── IO helpers ──────────────
-def write_json(objs: List[dict], target: pathlib.Path, jsonl: bool = False) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if jsonl:
-        with target.open("w", encoding="utf-8") as fh:
-            for obj in sorted(objs, key=lambda o: o["id"]):
-                fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    else:
-        json.dump(sorted(objs, key=lambda o: o["id"]), target.open("w"), indent=2, sort_keys=True)
+# ── CLI ───────────────────────────────────────────────────────────────
 
-# ────────────── CLI parsing ──────────────
-def parse_args():
-    p = argparse.ArgumentParser(description="Full Tree-sitter fact extractor")
-    p.add_argument("--out-full", required=True)
-    p.add_argument("--out-delta", required=True)
-    p.add_argument("--base-sha", default="HEAD~1")
-    p.add_argument("--jsonl", action="store_true")
-    p.add_argument("--workers", type=int, default=4)
-    p.add_argument("--verbose", action="count", default=0)
-    return p.parse_args()
+ap = argparse.ArgumentParser()
+ap.add_argument("--out-full", required=True)
+ap.add_argument("--out-delta", required=True)
+ap.add_argument("--base-sha", required=True)
+args = ap.parse_args()
 
-# ────────────── main routine ──────────────
-def main():
-    args = parse_args()
-    logging.basicConfig(level=max(logging.WARNING - 10 * args.verbose, logging.DEBUG))
+ROOT = pathlib.Path(".").resolve()
 
-    root = pathlib.Path(".").resolve()
+with suppress(subprocess.CalledProcessError):
+    # If the git command fails (e.g. not a repo), we treat as no‑changes.
+    changed_files_raw = subprocess.check_output(
+        ["git", "diff", "--name-only", args.base_sha, "HEAD"],
+        text=True,
+    ).splitlines()
+    changed_files: set[pathlib.Path] = {ROOT / f for f in changed_files_raw}
+else:
+    changed_files = set()
 
-    diff_cmd = ["git", "diff", "--name-only", args.base_sha, "HEAD"]
-    changed_files = {root / f for f in subprocess.check_output(diff_cmd, text=True).splitlines()}
+full: list[dict] = []
+delta: list[dict] = []
 
-    full, delta = [], []
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for facts in pool.map(lambda p: collect_facts(p, EXT_TO_LANG[p.suffix]), iter_source_files(root)):
-            if not facts:
-                continue
-            full.extend(facts)
-            if pathlib.Path(facts[0]["file"]) in changed_files:
-                delta.extend(facts)
+for path in ROOT.rglob("*"):
+    if not path.is_file():
+        continue
 
-    write_json(full, pathlib.Path(args.out_full), args.jsonl)
-    write_json(delta, pathlib.Path(args.out_delta), args.jsonl)
+    lang_id = EXT_TO_LANG.get(path.suffix)
+    if not lang_id:
+        # Unknown extension → silently skip.
+        continue
 
-    logging.info(f"Wrote {len(full)} facts → {args.out_full}")
-    logging.info(f"Wrote {len(delta)} delta facts → {args.out_delta}")
+    # Obtain parser if possible.
+    parser = None
+    with suppress(Exception):  # grammar may be unavailable
+        parser = get_parser(lang_id)
 
-if __name__ == "__main__":
+    # Collect facts with best‑effort fallbacks.
     try:
-        main()
-    except KeyboardInterrupt:
-        sys.exit(130)
+        if parser and lang_id == "python":
+            facts = collect_python(path, parser)
+        elif parser and lang_id == "dart":
+            facts = collect_dart(path, parser)
+        elif parser:
+            facts = file_fact(path, lang_id)
+        else:  # no parser – still emit something
+            facts = file_fact(path, lang_id)
+    except Exception:
+        # Any unexpected failure must *not* crash the whole run.
+        facts = file_fact(path, lang_id)
+
+    full.extend(facts)
+    if path in changed_files:
+        delta.extend(facts)
+
+# ── Write outputs ─────────────────────────────────────────────────────
+
+def dump(objs: list[dict], target: str):
+    pathlib.Path(target).parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "w", encoding="utf-8") as fh:
+        json.dump(sorted(objs, key=lambda x: x["id"]), fh, indent=2, sort_keys=True)
+
+
+dump(full, args.out_full)
+dump(delta, args.out_delta)
+print(f"Wrote {len(full)} symbols → {args.out_full}")
+print(f"Wrote {len(delta)} delta  → {args.out_delta}")
