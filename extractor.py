@@ -40,7 +40,7 @@ LANG_QUERIES: Dict[str, Dict[str, str]] = {
         """,
         "import": """
             (import_statement name: (dotted_name) @import.module)
-            (from_import_statement module_name: (dotted_name) @import.module)
+            (import_from_statement module_name: (dotted_name) @import.module)
         """,
         "decorator": """
             (decorator name: (identifier) @decorator.name)
