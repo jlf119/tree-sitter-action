@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Full Multi-language Tree-sitter fact extractor
---------------------------------------------
+Full Multi-language Tree-sitter fact extractor (fixed)
+----------------------------------------------------
 Emits all eight fact-types needed for EU MDR documentation across Python, JavaScript, TypeScript/TSX, and Go:
 
 - symbol: functions, classes, methods
@@ -13,7 +13,7 @@ Emits all eight fact-types needed for EU MDR documentation across Python, JavaSc
 - complexity: cyclomatic complexity per function
 - docstring: docstrings or top-of-function comments
 
-Usage: python extract_symbols.py --out-full full.json --out-delta delta.json [--base-sha SHA]
+Fix: uses `get_language()` for queries instead of non-existent parser.language attribute.
 """
 
 import argparse, hashlib, json, logging, pathlib, re, subprocess, sys
@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Dict, Iterable, List
 from tree_sitter import Node
-from tree_sitter_languages import get_parser
+from tree_sitter_languages import get_parser, get_language
 
 # ────────────── Language Configurations ──────────────
 EXT_TO_LANG = {
@@ -160,7 +160,6 @@ BRANCHING_TYPES = {
 }
 
 # ────────────── Utility helpers ──────────────
-
 def sha10(text: str) -> str:
     return hashlib.sha1(text.encode()).hexdigest()[:10]
 
@@ -185,12 +184,11 @@ def cyclomatic(node: Node, lang_id: str) -> int:
     return score
 
 # ────────────── Extraction ──────────────
-
 def collect_facts(path: pathlib.Path, lang_id: str) -> List[dict]:
     parser = parser_for(lang_id)
     src = path.read_bytes()
     tree = parser.parse(src)
-    language = parser.language
+    language = get_language(lang_id)  # FIX: get Language object for queries
 
     facts: List[dict] = []
 
@@ -206,7 +204,7 @@ def collect_facts(path: pathlib.Path, lang_id: str) -> List[dict]:
                     "id": "CU-" + sha10(f"symbol|{fq}|{path}"),
                     "kind": "symbol",
                     "symbol": fq,
-                    "signature": "()",  # placeholder for non-Python; could expand for others
+                    "signature": "()",
                     "lang": lang_id,
                     "complexity": cyclomatic(node.parent if node.parent else node, lang_id),
                     "file": str(path),
