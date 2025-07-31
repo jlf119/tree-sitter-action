@@ -2,28 +2,53 @@ name: "Tree-sitter fact dump"
 description: "Emit code_facts_full.json and code_facts_delta.json"
 
 inputs:
-  out_full:  { required: true }
-  out_delta: { required: true }
-  base_sha:  { required: true }
+  out_full:   { required: true }
+  out_delta:  { required: true }
+  base_sha:   { required: false }   # new: optional, defaults to HEAD~1
 
 runs:
   using: "composite"
   steps:
+    # ─────────────────────────── install Python ───────────────────────────
     - uses: actions/setup-python@v5
       with:
         python-version: "3.11"
 
-    - name: Install compatible Tree-sitter wheels
+    # ────────────────────────── poetry / pip cache ─────────────────────────
+    - name: Cache pip wheels
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: pip-${{ runner.os }}-py311-tree-sitter-0.20.4
+        restore-keys: |
+          pip-${{ runner.os }}-py311-
+
+    # ─────────────────────────── install deps ──────────────────────────────
+    - name: Install Tree-sitter wheels
       shell: bash
       run: |
         pip install --no-cache-dir \
           tree_sitter==0.20.4 \
           tree-sitter-languages==1.10.2
 
+    # ────────────────────────── generate code facts ────────────────────────
     - name: Generate code facts
       shell: bash
       run: |
         python "${{ github.action_path }}/extractor.py" \
-          --out-full   "${{ inputs.out_full }}" \
-          --out-delta  "${{ inputs.out_delta }}" \
-          --base-sha   "${{ inputs.base_sha }}"
+          --out-full  "${{ inputs.out_full }}" \
+          --out-delta "${{ inputs.out_delta }}" \
+          ${INPUT_BASE_SHA:+--base-sha "$INPUT_BASE_SHA"}
+
+    # ─────────────────────────── upload artefacts ──────────────────────────
+    - name: Upload full facts
+      uses: actions/upload-artifact@v4
+      with:
+        name: code_facts_full
+        path: "${{ inputs.out_full }}"
+
+    - name: Upload delta facts
+      uses: actions/upload-artifact@v4
+      with:
+        name: code_facts_delta
+        path: "${{ inputs.out_delta }}"
