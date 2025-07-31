@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Walk the repo with Tree‑sitter (using the pre‑built grammars from
-``tree‑sitter‑languages``) and emit JSON facts about every symbol it can
+``tree-sitter-languages``) and emit JSON facts about every symbol it can
 find.
 
  • ``--out-full``   – all symbols in ``HEAD``
@@ -15,10 +15,10 @@ For JavaScript/TypeScript/Go – and for any other language that has a
 Tree‑sitter grammar available but no bespoke collector – a single generic
 fact is emitted per file.
 
-If a file’s language *isn’t* recognised *or* a grammar is missing, the
-script **falls back gracefully** to a one‑fact‑per‑file strategy instead
-of aborting. This means it now *never* crashes just because it encounters
-an unfamiliar source file.
+If a file’s language **isn’t** recognised *or* a grammar is missing, the
+script falls back gracefully to a one‑fact‑per‑file strategy instead of
+aborting. This means it now *never* crashes just because it encounters an
+unfamiliar source file.
 """
 
 from __future__ import annotations
@@ -34,10 +34,10 @@ from contextlib import suppress
 from typing import List
 
 try:
-    from tree_sitter_languages import get_parser  # ready‑to‑use parsers
-except ImportError as exc:  # pragma: no‑cover – clearly actionable error
+    from tree_sitter_languages import get_parser  # ready-to-use parsers
+except ImportError:
     sys.stderr.write(
-        "tree_sitter_languages not importable - install it with\n"
+        "tree_sitter_languages not importable – install it with\n"
         "    pip install tree-sitter-languages\n"
     )
     raise
@@ -55,7 +55,7 @@ EXT_TO_LANG = {
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def sha10(text: str) -> str:
-    """Return the first 10 hex chars of an SHA‑1 hash (deterministic id)."""
+    """Return first 10 hex chars of SHA‑1 (deterministic id)."""
     return hashlib.sha1(text.encode()).hexdigest()[:10]
 
 # ── Python collector ─────────────────────────────────────────────────
@@ -113,7 +113,6 @@ _DART_DECL_NODES = {
 
 
 def _dart_fq_name(node, src: bytes, path: pathlib.Path) -> str:
-    """Best‑effort dotted name like ``lib.src.foo.Bar.baz``."""
     parts: List[str] = []
     while node:
         if node.type in _DART_DECL_NODES or node.type == "class_declaration":
@@ -180,15 +179,15 @@ args = ap.parse_args()
 
 ROOT = pathlib.Path(".").resolve()
 
-with suppress(subprocess.CalledProcessError):
-    # If the git command fails (e.g. not a repo), we treat as no‑changes.
+# Determine changed files vs base SHA (gracefully handle errors, e.g. not a git repo)
+try:
     changed_files_raw = subprocess.check_output(
         ["git", "diff", "--name-only", args.base_sha, "HEAD"],
         text=True,
     ).splitlines()
-    changed_files: set[pathlib.Path] = {ROOT / f for f in changed_files_raw}
-else:
-    changed_files = set()
+except subprocess.CalledProcessError:
+    changed_files_raw = []
+changed_files: set[pathlib.Path] = {ROOT / f for f in changed_files_raw}
 
 full: list[dict] = []
 delta: list[dict] = []
@@ -199,12 +198,11 @@ for path in ROOT.rglob("*"):
 
     lang_id = EXT_TO_LANG.get(path.suffix)
     if not lang_id:
-        # Unknown extension → silently skip.
-        continue
+        continue  # unknown extension
 
-    # Obtain parser if possible.
+    # Obtain parser if possible (may raise if grammar unavailable).
     parser = None
-    with suppress(Exception):  # grammar may be unavailable
+    with suppress(Exception):
         parser = get_parser(lang_id)
 
     # Collect facts with best‑effort fallbacks.
@@ -215,10 +213,9 @@ for path in ROOT.rglob("*"):
             facts = collect_dart(path, parser)
         elif parser:
             facts = file_fact(path, lang_id)
-        else:  # no parser – still emit something
+        else:
             facts = file_fact(path, lang_id)
-    except Exception:
-        # Any unexpected failure must *not* crash the whole run.
+    except Exception:  # pragma: no-cover – never let a single file kill the run
         facts = file_fact(path, lang_id)
 
     full.extend(facts)
