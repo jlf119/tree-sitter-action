@@ -66,9 +66,6 @@ LANG_QUERIES: Dict[str, Dict[str, str]] = {
         "import": """
             (import_statement source: (string) @import.module)
         """,
-        "decorator": """
-            (decorator name: (identifier) @decorator.name)
-        """,
         "call": """
             (call_expression function: (identifier) @call.name)
         """,
@@ -110,9 +107,6 @@ LANG_QUERIES: Dict[str, Dict[str, str]] = {
         """,
         "import": """
             (import_statement source: (string) @import.module)
-        """,
-        "decorator": """
-            (decorator name: (identifier) @decorator.name)
         """,
         "call": """
             (call_expression function: (identifier) @call.name)
